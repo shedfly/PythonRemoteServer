@@ -26,10 +26,12 @@ import threading
 import traceback
 
 if sys.version_info < (3,):
-    from SimpleXMLRPCServer import SimpleXMLRPCServer
     from StringIO import StringIO
     from xmlrpclib import Binary, ServerProxy
     PY2, PY3 = True, False
+    from twisted.web import xmlrpc, server
+    from twisted.internet import defer
+
 else:
     from io import StringIO
     from xmlrpc.client import Binary, ServerProxy
@@ -39,14 +41,15 @@ else:
     long = int
 
 
+
 __all__ = ['RobotRemoteServer', 'stop_remote_server', 'test_remote_server']
-__version__ = '1.1.1.dev1'
+__version__ = '0.0.0.exp1'
 
 BINARY = re.compile('[\x00-\x08\x0B\x0C\x0E-\x1F]')
 NON_ASCII = re.compile('[\x80-\xff]')
 
 
-class RobotRemoteServer(object):
+class RobotRemoteServer(xmlrpc.XMLRPC):
 
     def __init__(self, library, host='127.0.0.1', port=8270, port_file=None,
                  allow_stop='DEPRECATED', serve=True, allow_remote_stop=True):
@@ -70,26 +73,21 @@ class RobotRemoteServer(object):
                             ``Stop Remote Server`` keyword and
                             ``stop_remote_server`` XML-RPC method.
         """
+        self.port = port
+        self.host = host
+
+        xmlrpc.XMLRPC.__init__(self)
         self._library = RemoteLibraryFactory(library)
-        self._server = StoppableXMLRPCServer(host, int(port))
-        self._register_functions(self._server)
         self._port_file = port_file
         self._allow_remote_stop = allow_remote_stop \
                 if allow_stop == 'DEPRECATED' else allow_stop
         if serve:
             self.serve()
 
-    def _register_functions(self, server):
-        server.register_function(self.get_keyword_names)
-        server.register_function(self.run_keyword)
-        server.register_function(self.get_keyword_arguments)
-        server.register_function(self.get_keyword_documentation)
-        server.register_function(self.stop_remote_server)
-
     @property
     def server_address(self):
         """Server address as a tuple ``(host, port)``."""
-        return self._server.server_address
+        return self.host, self.port
 
     @property
     def server_port(self):
@@ -129,11 +127,10 @@ class RobotRemoteServer(object):
         is executed in a thread, then it is also possible to stop the server
         using the :meth:`stop` method.
         """
-        self._server.activate()
         self._announce_start(log, self._port_file)
-        with SignalHandler(self.stop):
-            self._server.serve()
-        self._announce_stop(log, self._port_file)
+        from twisted.internet import reactor 
+        reactor.listenTCP(port=self.port, factory=server.Site(self), interface=self.host)
+
 
     def _announce_start(self, log, port_file):
         self._log('started', log)
@@ -159,44 +156,41 @@ class RobotRemoteServer(object):
 
     # Exposed XML-RPC methods. Should they be moved to own class?
 
-    def stop_remote_server(self, log=True):
+    def xmlrpc_stop_remote_server(self, log=True):
         if not self._allow_remote_stop:
             self._log('does not allow stopping', log, warn=True)
             return False
         self.stop()
         return True
 
-    def get_keyword_names(self):
+    def xmlrpc_get_keyword_names(self):
         return self._library.get_keyword_names() + ['stop_remote_server']
 
-    def run_keyword(self, name, args, kwargs=None):
+    def xmlrpc_run_keyword(self, name, args, kwargs=None):
         if name == 'stop_remote_server':
             return KeywordRunner(self.stop_remote_server).run_keyword(args, kwargs)
         return self._library.run_keyword(name, args, kwargs)
 
-    def get_keyword_arguments(self, name):
+    def xmlrpc_get_keyword_arguments(self, name):
         if name == 'stop_remote_server':
             return []
         return self._library.get_keyword_arguments(name)
 
-    def get_keyword_documentation(self, name):
+    def xmlrpc_get_keyword_documentation(self, name):
         if name == 'stop_remote_server':
             return ('Stop the remote server unless stopping is disabled.\n\n'
                     'Return ``True/False`` depending was server stopped or not.')
         return self._library.get_keyword_documentation(name)
 
-    def get_keyword_tags(self, name):
+    def xmlrpc_get_keyword_tags(self, name):
         if name == 'stop_remote_server':
             return []
         return self._library.get_keyword_tags(name)
 
 
-class StoppableXMLRPCServer(SimpleXMLRPCServer):
-    allow_reuse_address = True
+class XMLRPCServer(xmlrpc.XMLRPC):
 
-    def __init__(self, host, port):
-        SimpleXMLRPCServer.__init__(self, (host, port), logRequests=False,
-                                    bind_and_activate=False)
+    def __init__(self):
         self._activated = False
         self._stopper_thread = None
 
